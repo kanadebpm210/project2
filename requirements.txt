@@ -1,6 +1,6 @@
-flask>=2.0
-ultralytics>=8.0
+flask
+ultralytics
 pillow
 requests
-torch   # if building on environment without torch preinstalled, note: this increases image size
+torch
 torchvision
