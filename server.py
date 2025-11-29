@@ -1,4 +1,3 @@
-# server.py
 import os
 import onnxruntime as ort
 from flask import Flask, request, jsonify
@@ -7,99 +6,114 @@ import numpy as np
 from io import BytesIO
 import traceback
 
+# -----------------------------
+# 環境変数 / ポート設定
+# -----------------------------
 PORT = int(os.environ.get("PORT", 10000))
-BEST_MODEL = "best.onnx"      # バッテリー判定
-OTHER_MODEL = "other.onnx"    # YOLOv8n ONNX
 
-# COCO 80クラス
-CLASS_NAMES = [
-    'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
-    'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat',
-    'dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack',
-    'umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball',
-    'kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket',
-    'bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich',
-    'orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
-    'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote',
-    'keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book',
-    'clock','vase','scissors','teddy bear','hair drier','toothbrush'
-]
+# モデルファイル
+BEST_MODEL = "best.onnx"
+OTHER_MODEL = "other.onnx"
 
+# Flaskアプリ作成
 app = Flask(__name__)
 
+# -----------------------------
 # ONNX モデルロード
+# -----------------------------
 def load_model(path):
     try:
-        sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-        input_name = sess.get_inputs()[0].name
-        shape = sess.get_inputs()[0].shape
-        return sess, input_name, shape
+        session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        input_name = session.get_inputs()[0].name
+        input_shape = session.get_inputs()[0].shape  # (batch, channels, H, W)
+        height, width = input_shape[2], input_shape[3]
+        return session, input_name, height, width
     except Exception:
         print(f"Failed to load {path}")
         traceback.print_exc()
-        return None, None, None
+        return None, None, None, None
 
-session_battery, input_battery, shape_battery = load_model(BEST_MODEL)
-session_other, input_other, shape_other = load_model(OTHER_MODEL)
+session_battery, input_battery, battery_height, battery_width = load_model(BEST_MODEL)
+session_other, input_other, other_height, other_width = load_model(OTHER_MODEL)
 
-# 前処理
-def preprocess(img, shape):
+# -----------------------------
+# 画像前処理
+# -----------------------------
+def preprocess(img, target_height, target_width):
     img = img.convert("RGB")
-    _, _, h, w = shape
-    img = img.resize((w, h))
+    img = img.resize((target_width, target_height))
     arr = np.array(img).astype(np.float32) / 255.0
-    arr = arr.transpose(2,0,1)
-    arr = np.expand_dims(arr,0)
+    arr = arr.transpose(2, 0, 1)  # HWC -> CHW
+    arr = np.expand_dims(arr, 0)   # batch次元追加
     return arr
 
-# 推論
-def run_battery(img):
-    if session_battery is None:
-        return "unknown"
-    inp = preprocess(img, shape_battery)
-    out = session_battery.run(None, {input_battery: inp})
-    # 出力次第で 0=unknown, 1=battery など
-    pred = np.argmax(out[0], axis=1)[0]
-    if pred == 1:
-        return "battery"
-    else:
-        return "unknown"
+# -----------------------------
+# 出力後処理（常に最大スコアのクラス名を返す）
+# -----------------------------
+def postprocess(output, names):
+    preds = output[0][0]
+    cls_scores = preds[5:]
+    cls_id = int(np.argmax(cls_scores))
+    label = names[cls_id] if cls_id < len(names) else "unknown"
+    return label
 
-def run_other(img):
-    if session_other is None:
-        return "unknown"
-    inp = preprocess(img, shape_other)
-    out = session_other.run(None, {input_other: inp})
-    preds = out[0]
-    if len(preds.shape) == 3:
-        scores = preds[0,:,5:]
-        max_idx = np.argmax(scores)
-        class_id = max_idx % len(CLASS_NAMES)
-        return CLASS_NAMES[class_id]
-    return "unknown"
-
+# -----------------------------
+# /predict エンドポイント
+# -----------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
-    if "image" not in request.files:
-        return jsonify({"error": "image required"}), 400
-
     try:
-        img = Image.open(BytesIO(request.files["image"].read()))
-    except UnidentifiedImageError:
-        return jsonify({"error": "cannot identify image"}), 400
+        if "image" not in request.files:
+            return jsonify({"error": "image required"}), 400
 
-    # まずバッテリー判定
-    label = run_battery(img)
-    if label != "unknown":
-        return jsonify({"result": label})
+        try:
+            img = Image.open(BytesIO(request.files["image"].read()))
+        except UnidentifiedImageError:
+            return jsonify({"error": "cannot identify image"}), 400
 
-    # バッテリーでなければ YOLOv8n 判定
-    label = run_other(img)
-    return jsonify({"result": label})
+        # batteryモデル
+        if session_battery:
+            inp_b = preprocess(img, battery_height, battery_width)
+            out_b = session_battery.run(None, {input_battery: inp_b})
+            result_b = postprocess(out_b, ["battery"])
+            if result_b == "battery":
+                return jsonify({"result": result_b})
 
+        # otherモデル
+        if session_other:
+            inp_o = preprocess(img, other_height, other_width)
+            other_names = [
+                'person','bicycle','car','motorcycle','airplane','bus','train','truck',
+                'boat','traffic light','fire hydrant','stop sign','parking meter','bench',
+                'bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe',
+                'backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard',
+                'sports ball','kite','baseball bat','baseball glove','skateboard','surfboard',
+                'tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl',
+                'banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza',
+                'donut','cake','chair','couch','potted plant','bed','dining table','toilet',
+                'tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
+                'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear',
+                'hair drier','toothbrush'
+            ]
+            out_o = session_other.run(None, {input_other: inp_o})
+            result_o = postprocess(out_o, other_names)
+            return jsonify({"result": result_o})
+
+        return jsonify({"result": "unknown"})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+# -----------------------------
+# 健康チェック用
+# -----------------------------
 @app.route("/")
 def index():
-    return jsonify({"status":"running"})
+    return jsonify({"status": "running"})
 
+# -----------------------------
+# Flask起動
+# -----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
