@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-
+pip install onnxruntime
 echo "==== Start script ===="
 
 MODEL_ID="${GDRIVE_MODEL_ID}"
