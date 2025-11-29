@@ -1,7 +1,7 @@
 import os
 import onnxruntime as ort
 from flask import Flask, request, jsonify
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import numpy as np
 import requests
 from io import BytesIO
@@ -21,33 +21,30 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_API_KEY = os.environ.get("SUPABASE_API_KEY")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
 
+# 推論閾値（低めに設定）
+BATTERY_THRESHOLD = 0.3
+OTHER_THRESHOLD = 0.2
+
 # Flaskアプリ作成
 app = Flask(__name__)
 
 # -----------------------------
 # ONNX モデルロード
 # -----------------------------
-print("Loading best.onnx ...")
-try:
-    session_battery = ort.InferenceSession(BEST_MODEL, providers=["CPUExecutionProvider"])
-    input_battery = session_battery.get_inputs()[0].name
-    battery_input_shape = session_battery.get_inputs()[0].shape  # (batch, channels, H, W)
-    battery_height, battery_width = battery_input_shape[2], battery_input_shape[3]
-except Exception:
-    print("Failed to load best.onnx")
-    traceback.print_exc()
-    session_battery = None
+def load_model(path):
+    try:
+        session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        input_name = session.get_inputs()[0].name
+        input_shape = session.get_inputs()[0].shape  # (batch, channels, H, W)
+        height, width = input_shape[2], input_shape[3]
+        return session, input_name, height, width
+    except Exception:
+        print(f"Failed to load {path}")
+        traceback.print_exc()
+        return None, None, None, None
 
-print("Loading other.onnx ...")
-try:
-    session_other = ort.InferenceSession(OTHER_MODEL, providers=["CPUExecutionProvider"])
-    input_other = session_other.get_inputs()[0].name
-    other_input_shape = session_other.get_inputs()[0].shape
-    other_height, other_width = other_input_shape[2], other_input_shape[3]
-except Exception:
-    print("Failed to load other.onnx")
-    traceback.print_exc()
-    session_other = None
+session_battery, input_battery, battery_height, battery_width = load_model(BEST_MODEL)
+session_other, input_other, other_height, other_width = load_model(OTHER_MODEL)
 
 # -----------------------------
 # Supabaseに結果を送信
@@ -73,6 +70,7 @@ def push_to_supabase(label):
 # 画像前処理
 # -----------------------------
 def preprocess(img, target_height, target_width):
+    img = img.convert("RGB")  # どんな画像でも RGB に変換
     img = img.resize((target_width, target_height))
     arr = np.array(img).astype(np.float32)
     arr /= 255.0
@@ -84,18 +82,24 @@ def preprocess(img, target_height, target_width):
 # 出力後処理
 # -----------------------------
 def postprocess(output, names, threshold=0.5):
-    preds = output[0][0]
-    if len(preds) < 6:
+    try:
+        preds = output[0][0]
+        if len(preds) < 6:
+            return "unknown"
+
+        cls_scores = preds[5:]
+        max_score = np.max(cls_scores)
+        cls_id = np.argmax(cls_scores)
+
+        print(f"[DEBUG] cls_scores: {cls_scores}, max_score: {max_score}")  # デバッグ用
+
+        if max_score < threshold:
+            return "unknown"
+
+        return names[cls_id] if cls_id < len(names) else "unknown"
+    except Exception:
+        traceback.print_exc()
         return "unknown"
-
-    cls_scores = preds[5:]
-    max_score = np.max(cls_scores)
-    cls_id = np.argmax(cls_scores)
-
-    if max_score < threshold:
-        return "unknown"
-
-    return names[cls_id] if cls_id < len(names) else "unknown"
 
 # -----------------------------
 # /predict エンドポイント
@@ -106,13 +110,16 @@ def predict():
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
 
-        img = Image.open(BytesIO(request.files["image"].read())).convert("RGB")
+        try:
+            img = Image.open(BytesIO(request.files["image"].read()))
+        except UnidentifiedImageError:
+            return jsonify({"error": "cannot identify image"}), 400
 
         # batteryモデル
         if session_battery:
             inp_b = preprocess(img, battery_height, battery_width)
             out_b = session_battery.run(None, {input_battery: inp_b})
-            result_b = postprocess(out_b, ["battery"], threshold=0.5)
+            result_b = postprocess(out_b, ["battery"], threshold=BATTERY_THRESHOLD)
             if result_b == "battery":
                 push_to_supabase("battery")
                 return jsonify({"result": "battery"})
@@ -122,7 +129,7 @@ def predict():
             inp_o = preprocess(img, other_height, other_width)
             other_names = ["plastic", "glass", "paper", "metal", "other"]
             out_o = session_other.run(None, {input_other: inp_o})
-            result_o = postprocess(out_o, other_names, threshold=0.4)
+            result_o = postprocess(out_o, other_names, threshold=OTHER_THRESHOLD)
             push_to_supabase(result_o)
             return jsonify({"result": result_o})
 
