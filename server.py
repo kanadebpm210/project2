@@ -1,113 +1,103 @@
-# server.py - Render 用（MODEL_URL ダウンロード対応／Supabase 環境変数修正）
 import os
-import requests
+import onnxruntime as ort
 from flask import Flask, request, jsonify
-from ultralytics import YOLO
 from PIL import Image
+import numpy as np
+import requests
 from io import BytesIO
 
-# YOLO 設定ディレクトリ（書き込み可能な場所）
-os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
-os.makedirs("/tmp/Ultralytics", exist_ok=True)
+PORT = int(os.environ.get("PORT", 10000))
 
-# 環境変数（名前で取得）
-MODEL_PATH = os.environ.get("MODEL_PATH", "best.pt")
-OTHER_MODEL = os.environ.get("OTHER_MODEL", "yolov8n.pt")
-PORT = int(os.environ.get("PORT", "10000"))
-MODEL_URL = os.environ.get("MODEL_URL")  # 例: https://storage.example.com/best.pt
+# File path
+BEST_MODEL = "best.onnx"
+OTHER_MODEL = "other.onnx"
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
+# Supabase env
+SUPABASE_URL  = os.environ.get("SUPABASE_URL")
 SUPABASE_API_KEY = os.environ.get("SUPABASE_API_KEY")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
 
 app = Flask(__name__)
 
-def push_to_supabase(class_name: str):
+print("Loading best.onnx ...")
+session_battery = ort.InferenceSession(BEST_MODEL, providers=["CPUExecutionProvider"])
+input_battery = session_battery.get_inputs()[0].name
+
+print("Loading other.onnx ...")
+session_other = ort.InferenceSession(OTHER_MODEL, providers=["CPUExecutionProvider"])
+input_other = session_other.get_inputs()[0].name
+
+
+def push_to_supabase(label):
     if not SUPABASE_URL or not SUPABASE_API_KEY:
-        print("Supabase 未設定：送信スキップ")
-        return False
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    headers = {
-        "apikey": SUPABASE_API_KEY,
-        "Authorization": f"Bearer {SUPABASE_API_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-    data = {"class": class_name}
+        return
     try:
-        res = requests.post(url, json=data, headers=headers, timeout=5)
-        res.raise_for_status()
-        print("Supabase 送信成功:", data)
-        return True
-    except Exception as e:
-        print("Supabase 送信エラー:", e)
-        return False
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}",
+            headers={
+                "apikey": SUPABASE_API_KEY,
+                "Authorization": f"Bearer {SUPABASE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"class": label},
+            timeout=6,
+        )
+    except Exception:
+        pass
 
-def ensure_model(path: str):
-    if os.path.exists(path):
-        print(f"Model found: {path}")
-        return True
-    if not MODEL_URL:
-        print("MODEL_URL not set and model not present.")
-        return False
-    print(f"Downloading model from {MODEL_URL} to {path} ...")
-    try:
-        r = requests.get(MODEL_URL, stream=True, timeout=120)
-        r.raise_for_status()
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        print("Model download completed.")
-        return True
-    except Exception as e:
-        print("Model download failed:", e)
-        return False
 
-# 起動時にモデルを確保（存在しなくてもサーバは起動）
-ensure_model(MODEL_PATH)
+def preprocess(img):
+    img = img.resize((640, 640))
+    arr = np.array(img).astype(np.float32)
+    arr /= 255.0
+    arr = arr.transpose(2, 0, 1)
+    arr = np.expand_dims(arr, 0)
+    return arr
 
-# モデル読み込み（存在しないと例外になります）
-print("Loading battery model:", MODEL_PATH)
-battery_model = YOLO(MODEL_PATH)
 
-print("Loading other model:", OTHER_MODEL)
-other_model = YOLO(OTHER_MODEL)
+def postprocess(output, names, threshold=0.5):
+    preds = output[0][0]
+    scores = preds[4]
+    cls_scores = preds[5:]
 
-def read_image(file):
-    img = Image.open(BytesIO(file.read())).convert("RGB")
-    return img
+    max_score = np.max(cls_scores)
+    cls_id = np.argmax(cls_scores)
 
-@app.route("/", methods=["GET"])
-def index():
-    return jsonify({"status": "ok", "message": "YOLO inference server running"}), 200
+    if max_score < threshold:
+        return "unknown"
+
+    return names[cls_id] if cls_id < len(names) else "unknown"
+
 
 @app.route("/predict", methods=["POST"])
 def predict():
     if "image" not in request.files:
-        return jsonify({"error": "image file required"}), 400
-    img = read_image(request.files["image"])
-    try:
-        battery_res = battery_model.predict(img, conf=0.5, verbose=False)[0]
-    except Exception as e:
-        print("battery model inference error:", e)
-        battery_res = None
-    if battery_res and len(battery_res.boxes) > 0:
+        return jsonify({"error": "image required"}), 400
+
+    img = Image.open(BytesIO(request.files["image"].read())).convert("RGB")
+    inp = preprocess(img)
+
+    # battery model
+    out_b = session_battery.run(None, {input_battery: inp})
+    result_b = postprocess(out_b, ["battery"], threshold=0.5)
+
+    if result_b == "battery":
         push_to_supabase("battery")
-        return jsonify({"result": "battery"}), 200
-    try:
-        other_res = other_model.predict(img, conf=0.3, verbose=False)[0]
-    except Exception as e:
-        print("other model inference error:", e)
-        other_res = None
-    if other_res and len(other_res.boxes) > 0:
-        cls_id = int(other_res.boxes.cls[0])
-        class_name = other_model.names[cls_id]
-        push_to_supabase(class_name)
-        return jsonify({"result": class_name}), 200
-    push_to_supabase("unknown")
-    return jsonify({"result": "unknown"}), 200
+        return jsonify({"result": "battery"})
+
+    # other model
+    other_names = ["plastic", "glass", "paper", "metal", "other"]
+    out_o = session_other.run(None, {input_other: inp})
+    result_o = postprocess(out_o, other_names, threshold=0.4)
+
+    push_to_supabase(result_o)
+    return jsonify({"result": result_o})
+
+
+@app.route("/")
+def index():
+    return jsonify({"status": "running"})
+
 
 if __name__ == "__main__":
-    print(f"Starting server on port {PORT}")
     app.run(host="0.0.0.0", port=PORT)
