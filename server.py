@@ -43,18 +43,17 @@ session_battery, input_battery, battery_height, battery_width = load_model(BEST_
 session_other, input_other, other_height, other_width = load_model(OTHER_MODEL)
 
 # -----------------------------
-# other.onnx のラベルを取得
+# other.onnx のクラス名取得
 # -----------------------------
 def get_class_names(session):
     try:
         meta = session.get_modelmeta().custom_metadata_map
         if "names" in meta:
-            names = eval(meta["names"])  # 文字列リスト -> Python list
+            names = eval(meta["names"])
             return names
     except Exception:
         pass
-    # fallback: 出力のチャンネル数から自動生成
-    n_classes = session.get_outputs()[0].shape[1] - 5  # YOLOは最初5要素がbox info
+    n_classes = session.get_outputs()[0].shape[1] - 5  # YOLO出力の最初5要素はbox情報
     return [f"class{i}" for i in range(n_classes)]
 
 other_names = get_class_names(session_other)
@@ -71,22 +70,22 @@ def preprocess(img, target_height, target_width):
     return arr
 
 # -----------------------------
-# 出力後処理
+# 出力後処理（クラス名のみ返す）
 # -----------------------------
 def postprocess(output, names, threshold=0.5):
     try:
         preds = output[0][0]
         if len(preds) < 6:
-            return "unknown", []
-
+            return "unknown"
         cls_scores = preds[5:]
         max_score = float(np.max(cls_scores))
         cls_id = int(np.argmax(cls_scores))
-        label = names[cls_id] if max_score >= threshold and cls_id < len(names) else "unknown"
-        return label, cls_scores.tolist()
+        if max_score < threshold or cls_id >= len(names):
+            return "unknown"
+        return names[cls_id]
     except Exception:
         traceback.print_exc()
-        return "unknown", []
+        return "unknown"
 
 # -----------------------------
 # /predict エンドポイント
@@ -96,29 +95,28 @@ def predict():
     try:
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
-
         try:
             img = Image.open(BytesIO(request.files["image"].read()))
         except UnidentifiedImageError:
             return jsonify({"error": "cannot identify image"}), 400
 
-        results = {}
-
-        # --- best.onnx 推論 ---
+        # best.onnx 推論
+        result_best = "unknown"
         if session_battery:
             inp_b = preprocess(img, battery_height, battery_width)
             out_b = session_battery.run(None, {input_battery: inp_b})
-            label_b, scores_b = postprocess(out_b, ["battery"], threshold=BATTERY_THRESHOLD)
-            results["best.onnx"] = {"result": label_b, "scores": scores_b}
+            result_best = postprocess(out_b, ["battery"], threshold=BATTERY_THRESHOLD)
+            if result_best == "battery":
+                return jsonify({"result": result_best})
 
-        # --- other.onnx 推論 ---
+        # other.onnx 推論
+        result_other = "unknown"
         if session_other:
             inp_o = preprocess(img, other_height, other_width)
             out_o = session_other.run(None, {input_other: inp_o})
-            label_o, scores_o = postprocess(out_o, other_names, threshold=OTHER_THRESHOLD)
-            results["other.onnx"] = {"result": label_o, "scores": scores_o}
+            result_other = postprocess(out_o, other_names, threshold=OTHER_THRESHOLD)
 
-        return jsonify(results)
+        return jsonify({"result": result_other})
 
     except Exception as e:
         traceback.print_exc()
