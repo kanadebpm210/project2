@@ -23,10 +23,14 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "best.pt")  # Git LFS で入れた bes
 OTHER_MODEL = os.environ.get("OTHER_MODEL", "yolov8n.pt")  # Render のメモリ対策
 PORT = int(os.environ.get("PORT", 10000))
 
-# Supabase 環境変数
-SUPABASE_URL = os.environ.get("https://njlztbylmzysvfmtwweh.supabase.co")  # 例: https://xxxx.supabase.co
-SUPABASE_API_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qbHp0YnlsbXp5c3ZmbXR3d2VoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MTA5NjkwMSwiZXhwIjoyMDc2NjcyOTAxfQ.uUdg3jv-GXSZ9GpC8eULMhW-NxWjCL7VH7kxClaLvkM")  # service_role
+# 環境変数名で取得する（値を直書きしない）
+SUPABASE_URL = os.environ.get("SUPABASE_URL")           # 例: https://xxxx.supabase.co
+SUPABASE_API_KEY = os.environ.get("SUPABASE_API_KEY")   # service_role key は安全に保管すること
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
+
+# 簡単なデバッグ出力
+if not SUPABASE_URL or not SUPABASE_API_KEY:
+    print("Warning: SUPABASE_URL or SUPABASE_API_KEY not set. Supabase posting will be skipped.")
 
 # ============================================================
 # Flask
