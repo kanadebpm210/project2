@@ -10,10 +10,24 @@ MODEL_PATH="./best.pt"
 echo "==== Starting AI Inference Server ===="
 
 # ===============================
-# gdown インストール
+# 仮想環境があれば有効化、なければ作成して有効化
 # ===============================
-python -m pip install --upgrade pip
-python -m pip install gdown --no-cache-dir
+if [ -d ".venv" ]; then
+  echo "Activating existing virtualenv .venv"
+  . .venv/bin/activate
+else
+  echo "Creating virtualenv .venv and activating"
+  python3 -m venv .venv
+  . .venv/bin/activate
+  python -m pip install --upgrade pip setuptools wheel
+  # requirements は Build 時に入れている想定だが、念のためここで入れる（軽め）
+  pip install -r requirements.txt || true
+fi
+
+# ===============================
+# gdown インストール（venv 内に入れる）
+# ===============================
+pip install gdown --no-cache-dir
 
 # ===============================
 # モデルが無ければ Google Drive からDL
@@ -27,7 +41,7 @@ else
 fi
 
 # ===============================
-# サーバ起動
+# サーバ起動（venv の python を使って実行）
 # ===============================
-echo "Launching Flask server..."
+echo "Launching Flask server with $(which python) ..."
 exec python server.py
