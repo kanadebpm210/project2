@@ -15,6 +15,10 @@ PORT = int(os.environ.get("PORT", 10000))
 BEST_MODEL = "best.onnx"
 OTHER_MODEL = "other.onnx"
 
+# 推論閾値（使用せず、常に最大スコアのクラスを返す）
+BATTERY_THRESHOLD = 0.3
+OTHER_THRESHOLD = 0.25
+
 # Flaskアプリ作成
 app = Flask(__name__)
 
@@ -43,19 +47,26 @@ def preprocess(img, target_height, target_width):
     img = img.convert("RGB")
     img = img.resize((target_width, target_height))
     arr = np.array(img).astype(np.float32) / 255.0
-    arr = arr.transpose(2, 0, 1)  # HWC -> CHW
-    arr = np.expand_dims(arr, 0)   # batch次元追加
+    arr = arr.transpose(2, 0, 1)
+    arr = np.expand_dims(arr, 0)
     return arr
 
 # -----------------------------
-# 出力後処理（常に最大スコアのクラス名を返す）
+# 出力後処理（最大スコアのクラス名のみ返す）
 # -----------------------------
 def postprocess(output, names):
-    preds = output[0][0]
-    cls_scores = preds[5:]
-    cls_id = int(np.argmax(cls_scores))
-    label = names[cls_id] if cls_id < len(names) else "unknown"
-    return label
+    try:
+        preds = output[0]  # (num_predictions, 85)
+        if preds.size == 0:
+            return "unknown"
+        cls_scores_all = preds[:, 5:]  # class scores
+        cls_max = np.max(cls_scores_all, axis=0)  # 各クラスの最大スコア
+        cls_id = int(np.argmax(cls_max))
+        label = names[cls_id] if cls_id < len(names) else "unknown"
+        return label
+    except Exception:
+        traceback.print_exc()
+        return "unknown"
 
 # -----------------------------
 # /predict エンドポイント
@@ -79,24 +90,29 @@ def predict():
             if result_b == "battery":
                 return jsonify({"result": result_b})
 
-        # otherモデル
+        # otherモデル（YOLOv8n）
         if session_other:
             inp_o = preprocess(img, other_height, other_width)
-            other_names = [
-                'person','bicycle','car','motorcycle','airplane','bus','train','truck',
-                'boat','traffic light','fire hydrant','stop sign','parking meter','bench',
-                'bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe',
-                'backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard',
-                'sports ball','kite','baseball bat','baseball glove','skateboard','surfboard',
-                'tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl',
-                'banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza',
-                'donut','cake','chair','couch','potted plant','bed','dining table','toilet',
-                'tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven',
-                'toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear',
-                'hair drier','toothbrush'
-            ]
-            out_o = session_other.run(None, {input_other: inp_o})
-            result_o = postprocess(out_o, other_names)
+            # other.onnxのクラス名（COCO 80クラス）
+            other_names = {
+                0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane',
+                5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light',
+                10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench',
+                14: 'bird', 15: 'cat', 16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow',
+                20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe', 24: 'backpack',
+                25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee',
+                30: 'skis', 31: 'snowboard', 32: 'sports ball', 33: 'kite', 34: 'baseball bat',
+                35: 'baseball glove', 36: 'skateboard', 37: 'surfboard', 38: 'tennis racket',
+                39: 'bottle', 40: 'wine glass', 41: 'cup', 42: 'fork', 43: 'knife', 44: 'spoon',
+                45: 'bowl', 46: 'banana', 47: 'apple', 48: 'sandwich', 49: 'orange',
+                50: 'broccoli', 51: 'carrot', 52: 'hot dog', 53: 'pizza', 54: 'donut',
+                55: 'cake', 56: 'chair', 57: 'couch', 58: 'potted plant', 59: 'bed',
+                60: 'dining table', 61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse',
+                65: 'remote', 66: 'keyboard', 67: 'cell phone', 68: 'microwave', 69: 'oven',
+                70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book', 74: 'clock',
+                75: 'vase', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'
+            }
+            result_o = postprocess(out_o, [other_names[i] for i in range(len(other_names))])
             return jsonify({"result": result_o})
 
         return jsonify({"result": "unknown"})
