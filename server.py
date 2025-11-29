@@ -9,7 +9,7 @@ import traceback
 
 PORT = int(os.environ.get("PORT", 10000))
 BEST_MODEL = "best.onnx"      # バッテリー判定
-OTHER_MODEL = "yolov8n.onnx"    # YOLOv8n ONNX
+OTHER_MODEL = "other.onnx"    # YOLOv8n ONNX
 
 # COCO 80クラス
 CLASS_NAMES = [
