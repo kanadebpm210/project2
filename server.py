@@ -1,4 +1,4 @@
-# server.py - Render 用（修正版）
+# server.py - Render 用（MODEL_URL ダウンロード対応／Supabase 環境変数修正）
 import os
 import requests
 from flask import Flask, request, jsonify
@@ -14,9 +14,8 @@ os.makedirs("/tmp/Ultralytics", exist_ok=True)
 MODEL_PATH = os.environ.get("MODEL_PATH", "best.pt")
 OTHER_MODEL = os.environ.get("OTHER_MODEL", "yolov8n.pt")
 PORT = int(os.environ.get("PORT", "10000"))
-MODEL_URL = os.environ.get("MODEL_URL")  # 例: https://.../best.pt
+MODEL_URL = os.environ.get("MODEL_URL")  # 例: https://storage.example.com/best.pt
 
-# Supabase 環境変数（正しく取得）
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_API_KEY = os.environ.get("SUPABASE_API_KEY")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
@@ -44,7 +43,6 @@ def push_to_supabase(class_name: str):
         print("Supabase 送信エラー:", e)
         return False
 
-# 起動時にモデルが無ければ MODEL_URL から取得
 def ensure_model(path: str):
     if os.path.exists(path):
         print(f"Model found: {path}")
@@ -54,7 +52,7 @@ def ensure_model(path: str):
         return False
     print(f"Downloading model from {MODEL_URL} to {path} ...")
     try:
-        r = requests.get(MODEL_URL, stream=True, timeout=60)
+        r = requests.get(MODEL_URL, stream=True, timeout=120)
         r.raise_for_status()
         with open(path, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
@@ -66,10 +64,10 @@ def ensure_model(path: str):
         print("Model download failed:", e)
         return False
 
-# モデル準備
-if not ensure_model(MODEL_PATH):
-    print("Warning: model not ready. Server will still start but predictions will fail until model is present.")
+# 起動時にモデルを確保（存在しなくてもサーバは起動）
+ensure_model(MODEL_PATH)
 
+# モデル読み込み（存在しないと例外になります）
 print("Loading battery model:", MODEL_PATH)
 battery_model = YOLO(MODEL_PATH)
 
