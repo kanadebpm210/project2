@@ -1,5 +1,6 @@
 flask
-ultralytics
+onnxruntime
 pillow
+numpy
 requests
 gdown
