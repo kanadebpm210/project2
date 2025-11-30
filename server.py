@@ -1,53 +1,59 @@
 import os
 import onnxruntime as ort
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from PIL import Image, UnidentifiedImageError
 import numpy as np
 from io import BytesIO
 import traceback
 
 # -----------------------------
-# 環境変数 / ポート設定
+# 基本設定
 # -----------------------------
 PORT = int(os.environ.get("PORT", 10000))
+MODEL_PATH = "other.onnx"
 
-# モデルファイル
-OTHER_MODEL = "other.onnx"  # YOLOv8n
-
-# Flaskアプリ作成
 app = Flask(__name__)
+CORS(app)  # Android からアクセス可能に
+
 
 # -----------------------------
-# ONNX モデルロード
+# モデルロード
 # -----------------------------
 def load_model(path):
     try:
-        session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession(
+            path,
+            providers=["CPUExecutionProvider"]
+        )
         input_name = session.get_inputs()[0].name
-        input_shape = session.get_inputs()[0].shape  # (batch, channels, H, W)
-        height, width = input_shape[2], input_shape[3]
-        print(f"Loaded model: {path}, input={height}x{width}")
-        return session, input_name, height, width
+        shape = session.get_inputs()[0].shape  # (1,3,H,W)
+        h, w = shape[2], shape[3]
+        print(f"✔ Loaded ONNX: {path}, input={w}x{h}")
+        return session, input_name, h, w
     except Exception:
-        print(f"Failed to load: {path}")
+        print("❌ Failed to load ONNX")
         traceback.print_exc()
         return None, None, None, None
 
-session_other, input_other, other_height, other_width = load_model(OTHER_MODEL)
+
+session_other, input_other, other_h, other_w = load_model(MODEL_PATH)
+
 
 # -----------------------------
-# 画像前処理（YOLO互換）
+# 前処理
 # -----------------------------
-def preprocess(img, target_height, target_width):
+def preprocess(img, h, w):
     img = img.convert("RGB")
-    img = img.resize((target_width, target_height))
+    img = img.resize((w, h))
     arr = np.array(img).astype(np.float32) / 255.0
-    arr = arr.transpose(2, 0, 1)  # HWC -> CHW
+    arr = arr.transpose(2, 0, 1)  # HWC → CHW
     arr = np.expand_dims(arr, 0)
     return arr
 
+
 # -----------------------------
-# COCO 80クラス
+# COCO クラス一覧
 # -----------------------------
 COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
@@ -61,10 +67,8 @@ COCO_CLASSES = [
     'scissors','teddy bear','hair drier','toothbrush'
 ]
 
-# -----------------------------
-# ゴミと判定するクラス
-# -----------------------------
-GARBAGE_CLASSES = {
+# ゴミとして扱うクラス
+GARBAGE_CLASSES = set([
     'bottle','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
     'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant',
     'bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
@@ -72,36 +76,43 @@ GARBAGE_CLASSES = {
     'teddy bear','hair drier','toothbrush','umbrella','handbag','tie','suitcase','frisbee',
     'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard',
     'surfboard','tennis racket','backpack'
-}
+])
+
 
 # -----------------------------
-# 出力後処理（ゴミクラスすべて返す / 空なら最大スコアクラス返す）
+# 後処理
 # -----------------------------
 def postprocess(output):
     try:
-        preds = output[0]  # (num_boxes, 85)
+        preds = output[0]  # shape: (num_boxes, 85)
         if preds.size == 0:
-            # 空なら最大スコアのクラスを返す
-            return [COCO_CLASSES[int(np.argmax(np.zeros(len(COCO_CLASSES))))]]
+            return []
 
-        obj_score = preds[:, 4:5]        # objectness
-        cls_scores = preds[:, 5:]        # class scores
-        combined_scores = cls_scores * obj_score  # objectness を掛ける
+        # objectness × class score
+        obj = preds[:, 4:5]
+        cls = preds[:, 5:]
+        scores = obj * cls
 
-        cls_ids = np.argmax(combined_scores, axis=1)
-        labels = [COCO_CLASSES[i] for i in cls_ids if COCO_CLASSES[i] in GARBAGE_CLASSES]
+        cls_ids = np.argmax(scores, axis=1)
 
-        if not labels:
-            # 空なら最大スコアのクラスを返す
-            cls_max = np.max(combined_scores, axis=0)
-            cls_id = int(np.argmax(cls_max))
-            labels = [COCO_CLASSES[cls_id]]
+        # ゴミクラスだけ抽出
+        detected = []
+        for cid in cls_ids:
+            label = COCO_CLASSES[cid]
+            if label in GARBAGE_CLASSES:
+                detected.append(label)
 
-        return list(set(labels))  # 重複削除
+        # detected が空 → スコア最大のクラスを返す
+        if not detected:
+            best_id = int(np.argmax(scores.max(axis=0)))
+            detected = [COCO_CLASSES[best_id]]
+
+        return list(set(detected))
 
     except Exception:
         traceback.print_exc()
         return []
+
 
 # -----------------------------
 # /predict エンドポイント
@@ -110,26 +121,30 @@ def postprocess(output):
 def predict():
     try:
         if "image" not in request.files:
-            return jsonify({"error": "image required"}), 400
+            return jsonify({"error": "image file required"}), 400
 
         # 画像読み込み
         try:
-            img = Image.open(BytesIO(request.files["image"].read()))
+            img_bytes = request.files["image"].read()
+            img = Image.open(BytesIO(img_bytes))
         except UnidentifiedImageError:
-            return jsonify({"error": "cannot identify image"}), 400
+            return jsonify({"error": "invalid image"}), 400
 
-        # YOLOv8n 推論
-        if session_other:
-            inp_o = preprocess(img, other_height, other_width)
-            out_o = session_other.run(None, {input_other: inp_o})
-            result_o = postprocess(out_o)
-            return jsonify({"result": result_o})
+        # モデル未ロード時
+        if not session_other:
+            return jsonify({"error": "model not loaded"}), 500
 
-        return jsonify({"result": []})
+        # 推論
+        inp = preprocess(img, other_h, other_w)
+        out = session_other.run(None, {input_other: inp})
+        result = postprocess(out)
+
+        return jsonify({"result": result})
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 # -----------------------------
 # 健康チェック
@@ -138,8 +153,10 @@ def predict():
 def index():
     return jsonify({"status": "running"})
 
+
 # -----------------------------
-# Flask起動
+# サーバー起動
 # -----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    print("🔥 Flask ONNX Inference Server Starting...")
+    app.run(host="0.0.0.0", port=PORT, debug=False)
