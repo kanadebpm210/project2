@@ -12,7 +12,7 @@ import traceback
 PORT = int(os.environ.get("PORT", 10000))
 
 # モデルファイル
-OTHER_MODEL = "other.onnx"  # YOLOv8n ONNX
+OTHER_MODEL = "other.onnx"  # YOLOv8n
 
 # Flaskアプリ作成
 app = Flask(__name__)
@@ -42,51 +42,63 @@ def preprocess(img, target_height, target_width):
     img = img.convert("RGB")
     img = img.resize((target_width, target_height))
     arr = np.array(img).astype(np.float32) / 255.0
-    arr = arr.transpose(2, 0, 1)  # HWC → CHW
+    arr = arr.transpose(2, 0, 1)  # HWC -> CHW
     arr = np.expand_dims(arr, 0)
     return arr
 
 # -----------------------------
-# ゴミクラス＋傘のみ返す
+# COCO 80クラス
 # -----------------------------
-GARBAGE_CLASSES = [
-    'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon',
-    'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli',
-    'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair',
-    'couch', 'potted plant', 'toilet', 'tv', 'laptop', 'mouse',
-    'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster',
-    'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors',
-    'teddy bear', 'hair drier', 'toothbrush', 'umbrella'  # ここに傘を追加
-]
-
-# COCO 80 クラス
 COCO_CLASSES = [
-    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
-    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
-    'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-    'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich',
-    'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant',
-    'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave',
-    'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
-    'toothbrush'
+    'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
+    'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
+    'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+    'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard',
+    'tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple',
+    'sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
+    'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard',
+    'cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase',
+    'scissors','teddy bear','hair drier','toothbrush'
 ]
 
 # -----------------------------
-# 推論後処理（ゴミクラスのみ抽出）
+# ゴミと判定するクラス
+# -----------------------------
+GARBAGE_CLASSES = {
+    'bottle','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
+    'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant',
+    'bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
+    'microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors',
+    'teddy bear','hair drier','toothbrush','umbrella','handbag','tie','suitcase','frisbee',
+    'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard',
+    'surfboard','tennis racket','backpack'
+}
+
+# -----------------------------
+# 出力後処理（ゴミクラスすべて返す / 空なら最大スコアクラス返す）
 # -----------------------------
 def postprocess(output):
     try:
         preds = output[0]  # (num_boxes, 85)
         if preds.size == 0:
-            return []
+            # 空なら最大スコアのクラスを返す
+            return [COCO_CLASSES[int(np.argmax(np.zeros(len(COCO_CLASSES))))]]
 
-        cls_scores = preds[:, 5:]  # class scores
-        cls_ids = np.argmax(cls_scores, axis=1)
+        obj_score = preds[:, 4:5]        # objectness
+        cls_scores = preds[:, 5:]        # class scores
+        combined_scores = cls_scores * obj_score  # objectness を掛ける
+
+        cls_ids = np.argmax(combined_scores, axis=1)
         labels = [COCO_CLASSES[i] for i in cls_ids if COCO_CLASSES[i] in GARBAGE_CLASSES]
 
-        # 重複除去
-        return list(set(labels))
+        if not labels:
+            # 空なら最大スコアのクラスを返す
+            cls_max = np.max(combined_scores, axis=0)
+            cls_id = int(np.argmax(cls_max))
+            labels = [COCO_CLASSES[cls_id]]
+
+        return list(set(labels))  # 重複削除
+
     except Exception:
         traceback.print_exc()
         return []
@@ -100,26 +112,18 @@ def predict():
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
 
+        # 画像読み込み
         try:
             img = Image.open(BytesIO(request.files["image"].read()))
         except UnidentifiedImageError:
             return jsonify({"error": "cannot identify image"}), 400
 
+        # YOLOv8n 推論
         if session_other:
-            inp = preprocess(img, other_height, other_width)
-            out = session_other.run(None, {input_other: inp})
-            result = postprocess(out)
-            if not result:
-                # 空なら一番低いスコアのクラスを返す
-                cls_scores_all = out[0][:, 5:]
-                if cls_scores_all.size == 0:
-                    result = ["unknown"]
-                else:
-                    cls_max = np.max(cls_scores_all, axis=0)
-                    cls_id = int(np.argmax(cls_max))
-                    result = [COCO_CLASSES[cls_id]]
-
-            return jsonify({"result": result})
+            inp_o = preprocess(img, other_height, other_width)
+            out_o = session_other.run(None, {input_other: inp_o})
+            result_o = postprocess(out_o)
+            return jsonify({"result": result_o})
 
         return jsonify({"result": []})
 
