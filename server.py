@@ -11,14 +11,14 @@ import traceback
 # -----------------------------
 PORT = int(os.environ.get("PORT", 10000))
 
-# モデルファイル
-OTHER_MODEL = "other.onnx"  # YOLOv8n
+# YOLOv8 ONNXモデル
+OTHER_MODEL = "other.onnx"
 
 # Flaskアプリ作成
 app = Flask(__name__)
 
 # -----------------------------
-# ONNX モデルロード関数
+# ONNXモデルロード
 # -----------------------------
 def load_model(path):
     try:
@@ -36,36 +36,30 @@ def load_model(path):
 session_other, input_other, other_height, other_width = load_model(OTHER_MODEL)
 
 # -----------------------------
-# YOLOv8n クラス名
+# COCO 80クラス名
 # -----------------------------
-other_names = {
-    0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane',
-    5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light',
-    10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench',
-    14: 'bird', 15: 'cat', 16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow',
-    20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe', 24: 'backpack',
-    25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee',
-    30: 'skis', 31: 'snowboard', 32: 'sports ball', 33: 'kite', 34: 'baseball bat',
-    35: 'baseball glove', 36: 'skateboard', 37: 'surfboard', 38: 'tennis racket',
-    39: 'bottle', 40: 'wine glass', 41: 'cup', 42: 'fork', 43: 'knife', 44: 'spoon',
-    45: 'bowl', 46: 'banana', 47: 'apple', 48: 'sandwich', 49: 'orange',
-    50: 'broccoli', 51: 'carrot', 52: 'hot dog', 53: 'pizza', 54: 'donut',
-    55: 'cake', 56: 'chair', 57: 'couch', 58: 'potted plant', 59: 'bed',
-    60: 'dining table', 61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse',
-    65: 'remote', 66: 'keyboard', 67: 'cell phone', 68: 'microwave', 69: 'oven',
-    70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book', 74: 'clock',
-    75: 'vase', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'
-}
+COCO_CLASSES = [
+    'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
+    'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat',
+    'dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella',
+    'handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite',
+    'baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
+    'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
+    'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant',
+    'bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
+    'microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors',
+    'teddy bear','hair drier','toothbrush'
+]
 
 # -----------------------------
-# ゴミクラス
+# ゴミクラス一覧（返したいものだけ）
 # -----------------------------
-garbage_classes = [
-    "bottle", "cup", "fork", "knife", "spoon",
-    "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut",
-    "cake", "chair", "couch", "potted plant", "book",
-    "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+GARBAGE_CLASSES = [
+    "bottle","cup","fork","knife","spoon","bowl","banana","apple","sandwich",
+    "orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch",
+    "potted plant","bed","dining table","toilet","tv","laptop","mouse","remote",
+    "keyboard","cell phone","microwave","oven","toaster","sink","refrigerator",
+    "book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
 ]
 
 # -----------------------------
@@ -80,6 +74,38 @@ def preprocess(img, target_height, target_width):
     return arr
 
 # -----------------------------
+# 出力後処理
+# -----------------------------
+def postprocess(output):
+    """
+    複数物体が写っている場合はゴミクラスを全て返す。
+    ゴミがなければスコアが最も高いクラスを1つ返す。
+    """
+    try:
+        preds = output[0]  # (num_boxes, 85)
+        if preds.size == 0:
+            return [COCO_CLASSES[0]]  # 安全策
+
+        cls_scores = preds[:, 5:]  # class scores
+        cls_ids = np.argmax(cls_scores, axis=1)
+        detected_classes = [COCO_CLASSES[i] for i in cls_ids]
+
+        # ゴミクラスだけ抽出
+        garbage_detected = list({c for c in detected_classes if c in GARBAGE_CLASSES})
+
+        if len(garbage_detected) == 0:
+            # ゴミが無ければスコア最大のクラスを1つ返す
+            max_scores_per_box = np.max(cls_scores, axis=1)
+            top_idx = int(np.argmax(max_scores_per_box))
+            top_cls_id = int(np.argmax(cls_scores[top_idx]))
+            return [COCO_CLASSES[top_cls_id]]
+
+        return garbage_detected
+    except Exception:
+        traceback.print_exc()
+        return [COCO_CLASSES[0]]  # 安全策
+
+# -----------------------------
 # /predict エンドポイント
 # -----------------------------
 @app.route("/predict", methods=["POST"])
@@ -88,29 +114,16 @@ def predict():
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
 
-        # 画像読み込み
         try:
             img = Image.open(BytesIO(request.files["image"].read()))
         except UnidentifiedImageError:
             return jsonify({"error": "cannot identify image"}), 400
 
         inp = preprocess(img, other_height, other_width)
-
-        # 推論
         out = session_other.run(None, {input_other: inp})
-        preds = out[0]  # (num_boxes, 85)
+        result = postprocess(out)
 
-        detected_garbage = set()
-
-        if preds.size > 0:
-            cls_scores = preds[:, 5:]  # クラススコア
-            cls_ids = np.argmax(cls_scores, axis=1)  # 各ボックスの最大スコアクラス
-            for cls_id in cls_ids:
-                cls_name = other_names[cls_id]
-                if cls_name in garbage_classes:
-                    detected_garbage.add(cls_name)
-
-        return jsonify({"result": list(detected_garbage)})
+        return jsonify({"result": result})
 
     except Exception as e:
         traceback.print_exc()
