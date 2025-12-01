@@ -8,7 +8,6 @@ from flask_cors import CORS
 from PIL import Image, UnidentifiedImageError
 import numpy as np
 import requests
-import json
 
 # -----------------------------
 # 基本設定
@@ -100,9 +99,9 @@ def postprocess(output):
         return []
 
 # -----------------------------
-# Supabase 保存 (json/text[] 自動対応)
+# Supabase 保存 (class カラム対応)
 # -----------------------------
-def save_to_supabase(labels):
+def save_to_supabase(class_name: str) -> bool:
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("⚠ Supabase URL/KEY not set. Skipping save.")
         return False
@@ -114,13 +113,7 @@ def save_to_supabase(labels):
             "Content-Type": "application/json",
             "Prefer": "return=minimal"
         }
-
-        # text[] 型対応: PostgreSQL 配列リテラルに変換
-        if isinstance(labels, list):
-            payload = {"labels": labels}  # json 型ならそのまま送信
-        else:
-            payload = {"labels": [str(labels)]}
-
+        payload = {"class": class_name}  # 単一クラス名
         res = requests.post(url, json=payload, headers=headers, timeout=10)
         print("Supabase response:", res.status_code, res.text)
         return res.status_code in (200, 201)
@@ -150,7 +143,8 @@ def predict():
         inp = preprocess(img, model_h, model_w)
         out = session.run(None, {input_name: inp})
         labels = postprocess(out)
-        saved = save_to_supabase(labels)
+        class_name = labels[0] if labels else None
+        saved = save_to_supabase(class_name) if class_name else False
 
         return jsonify({"result": labels, "saved": saved})
     except Exception as e:
@@ -164,6 +158,7 @@ def predict():
 def index():
     return jsonify({"status": "running", "model_loaded": session is not None})
 
+# -----------------------------
 if __name__ == "__main__":
     print("🔥 Flask Inference Server Ready")
     app.run(host="0.0.0.0", port=PORT)
