@@ -56,7 +56,7 @@ def preprocess(img, h, w):
 
 
 # -----------------------------
-# COCO クラス
+# COCO クラス（80クラス）
 # -----------------------------
 COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
@@ -70,50 +70,36 @@ COCO_CLASSES = [
     'scissors','teddy bear','hair drier','toothbrush'
 ]
 
-GARBAGE_CLASSES = set([
-    'bottle','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange',
-    'broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant',
-    'bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
-    'microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors',
-    'teddy bear','hair drier','toothbrush','umbrella','handbag','tie','suitcase','frisbee',
-    'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard',
-    'surfboard','tennis racket','backpack'
-])
-
 
 # -----------------------------
-# 後処理
+# 後処理（最もスコアが高い1クラスのみ返す）
 # -----------------------------
 def postprocess(output):
-    preds = output[0]
+    preds = output[0]  # (num_boxes, 85)
 
     if preds.size == 0:
         return []
 
+    # objectness, class scores
     obj = preds[:, 4:5]
     cls = preds[:, 5:]
-    scores = obj * cls
-    cls_ids = np.argmax(scores, axis=1)
+    scores = obj * cls  # combine
 
-    detected = []
-    for cid in cls_ids:
-        name = COCO_CLASSES[cid]
-        if name in GARBAGE_CLASSES:
-            detected.append(name)
+    # 最も自信の高いボックスを取得
+    max_score_flat = scores.max()
+    idx_box, idx_class = np.unravel_index(scores.argmax(), scores.shape)
 
-    if not detected:
-        best_c = int(np.argmax(scores.max(axis=0)))
-        detected = [COCO_CLASSES[best_c]]
+    best_class = COCO_CLASSES[idx_class]
 
-    return list(set(detected))
+    return [best_class]
 
 
 # -----------------------------
-# Supabase に結果を保存
+# Supabase に保存
 # -----------------------------
 def save_to_supabase(labels):
     if SUPABASE_URL is None or SUPABASE_KEY is None:
-        print("⚠ Supabase 情報が設定されていません。保存をスキップします。")
+        print("⚠ Supabase 情報が未設定。保存スキップ。")
         return False
 
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
@@ -154,7 +140,7 @@ def predict():
         out = session.run(None, {input_name: inp})
         labels = postprocess(out)
 
-        # 🚀 結果を Supabase に保存
+        # 保存
         save_to_supabase(labels)
 
         return jsonify({"result": labels})
@@ -170,5 +156,5 @@ def index():
 
 
 if __name__ == "__main__":
-    print("🔥 Flask Inference Server with Supabase Enabled")
+    print("🔥 Flask Inference Server (COCO only, Supabase enabled)")
     app.run(host="0.0.0.0", port=PORT)
