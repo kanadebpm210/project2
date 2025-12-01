@@ -12,9 +12,9 @@ import requests
 # 基本設定
 # -----------------------------
 PORT = int(os.environ.get("PORT", 10000))
-MODEL_PATH = "other.onnx"
+MODEL_PATH = "other.onnx"   # ← このファイル「だけ」を使う
 
-# Supabase 設定
+# Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
@@ -22,29 +22,22 @@ SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
 app = Flask(__name__)
 CORS(app)
 
-
 # -----------------------------
-# モデルロード（安全版）
+# モデルロード
 # -----------------------------
 def load_model(path):
     try:
+        print(f"Loading ONNX model: {path}")
         session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-        input_name = session.get_inputs()[0].name
-        shape = session.get_inputs()[0].shape  # [1,3,h,w] または [None,3,None,None]
+        input_info = session.get_inputs()[0]
 
-        h, w = None, None
+        input_name = input_info.name
+        shape = input_info.shape
 
-        # shape が None の場合に対応
-        if len(shape) == 4:
-            h = shape[2]
-            w = shape[3]
+        # shape = [1, 3, H, W]
+        _, _, h, w = shape
 
-        # None の場合は YOLO 既定の 640x640 を採用
-        if h is None or w is None:
-            print("⚠ Model shape undefined → fallback to 640x640")
-            h, w = 640, 640
-
-        print(f"✔ Loaded model: {path} (input={w}x{h})")
+        print(f"✔ Model loaded. Input tensor: {input_name}, shape={shape}")
         return session, input_name, h, w
 
     except Exception:
@@ -55,18 +48,16 @@ def load_model(path):
 
 session, input_name, model_h, model_w = load_model(MODEL_PATH)
 
-
 # -----------------------------
 # 前処理
 # -----------------------------
 def preprocess(img, h, w):
     img = img.convert("RGB")
-    img = img.resize((w, h))
+    img = img.resize((w, h))  # ← モデルの shape に合わせる
     arr = np.array(img).astype(np.float32) / 255.0
     arr = arr.transpose(2, 0, 1)
     arr = np.expand_dims(arr, 0)
     return arr
-
 
 # -----------------------------
 # COCO クラス
@@ -83,32 +74,30 @@ COCO_CLASSES = [
     'scissors','teddy bear','hair drier','toothbrush'
 ]
 
-
 # -----------------------------
-# 後処理（最も自信が高い1クラスだけ返す）
+# 後処理
 # -----------------------------
 def postprocess(output):
     preds = output[0]  # (num_boxes, 85)
 
-    if preds.size == 0:
-        return ["unknown"]
+    if preds is None or preds.size == 0:
+        return []
 
-    obj = preds[:, 4:5]   # object confidence
-    cls = preds[:, 5:]    # class confidence scores
-    scores = obj * cls    # combine
+    obj = preds[:, 4:5]
+    cls = preds[:, 5:]
+    scores = obj * cls
 
-    idx_box, idx_class = np.unravel_index(scores.argmax(), scores.shape)
-    best_class = COCO_CLASSES[idx_class]
+    max_score = scores.max()
+    box_idx, cls_idx = np.unravel_index(scores.argmax(), scores.shape)
 
-    return [best_class]
-
+    return [COCO_CLASSES[int(cls_idx)]]
 
 # -----------------------------
-# Supabase に保存
+# Supabase 保存
 # -----------------------------
 def save_to_supabase(labels):
-    if SUPABASE_URL is None or SUPABASE_KEY is None:
-        print("⚠ Supabase 未設定 → 保存スキップ")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("⚠ Supabase settings missing. Skip save.")
         return False
 
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
@@ -130,22 +119,20 @@ def save_to_supabase(labels):
         traceback.print_exc()
         return False
 
-
 # -----------------------------
 # /predict
 # -----------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        if "image" not in request.files:
-            return jsonify({"error": "image required"}), 400
+        if session is None:
+            return jsonify({"error": "model not loaded"}), 500
 
-        file = request.files["image"]
-        if file.filename == "":
-            return jsonify({"error": "empty filename"}), 400
+        if "image" not in request.files:
+            return jsonify({"error": "image is required"}), 400
 
         try:
-            img = Image.open(file.stream)
+            img = Image.open(BytesIO(request.files["image"].read()))
         except UnidentifiedImageError:
             return jsonify({"error": "invalid image"}), 400
 
@@ -161,12 +148,12 @@ def predict():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
+# -----------------------------
 @app.route("/")
 def index():
     return jsonify({"status": "running"})
 
-
+# -----------------------------
 if __name__ == "__main__":
     print("🔥 Flask Inference Server (COCO only, Supabase enabled)")
     app.run(host="0.0.0.0", port=PORT)
