@@ -9,6 +9,7 @@ from flask_cors import CORS
 from PIL import Image
 import numpy as np
 import requests
+import cv2  # Letterbox用にOpenCVを使用
 
 # -----------------------------
 # 基本設定
@@ -48,13 +49,30 @@ def load_model(path):
 session, input_name, model_h, model_w = load_model(MODEL_PATH)
 
 # -----------------------------
+# Letterbox リサイズ
+# -----------------------------
+def letterbox(img, new_size=(640, 640), color=(114, 114, 114)):
+    img = np.array(img)
+    h, w = img.shape[:2]
+    new_w, new_h = new_size
+    scale = min(new_w / w, new_h / h)
+    resized_w, resized_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(img, (resized_w, resized_h))
+    pad_w = new_w - resized_w
+    pad_h = new_h - resized_h
+    top, bottom = pad_h // 2, pad_h - pad_h // 2
+    left, right = pad_w // 2, pad_w - pad_w // 2
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return padded
+
+# -----------------------------
 # 前処理
 # -----------------------------
 def preprocess(img, h, w):
-    img = img.convert("RGB").resize((w, h))
-    arr = np.array(img).astype(np.float32) / 255.0
-    arr = arr.transpose(2, 0, 1)
-    return np.expand_dims(arr, 0)
+    img = letterbox(img, new_size=(w, h))
+    img = img[:, :, ::-1]  # BGR -> RGB
+    img = img.transpose(2, 0, 1).astype(np.float32) / 255.0
+    return np.expand_dims(img, 0)
 
 # -----------------------------
 # COCOクラス
