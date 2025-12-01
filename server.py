@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import os
 import traceback
 import onnxruntime as ort
@@ -8,18 +7,17 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from PIL import Image
 import numpy as np
+import cv2
 import requests
-import cv2  # Letterbox用にOpenCVを使用
 
 # -----------------------------
 # 基本設定
 # -----------------------------
 PORT = int(os.environ.get("PORT", 10000))
-MODEL_PATH = os.environ.get("MODEL_PATH", "other.onnx")  # YOLOv8 ONNXモデル
-
+MODEL_PATH = os.environ.get("MODEL_PATH", "other.onnx")  # yolov8n.onnx
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")  # id, created_at, class
+SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
 
 app = Flask(__name__)
 CORS(app)
@@ -36,8 +34,6 @@ def load_model(path):
         shape = input_info.shape
         try:
             _, _, h, w = shape
-            if h is None or w is None:
-                raise ValueError
             h, w = int(h), int(w)
         except:
             h, w = 640, 640
@@ -49,30 +45,26 @@ def load_model(path):
 session, input_name, model_h, model_w = load_model(MODEL_PATH)
 
 # -----------------------------
-# Letterbox リサイズ
+# Letterbox (アスペクト比維持) 前処理
 # -----------------------------
-def letterbox(img, new_size=(640, 640), color=(114, 114, 114)):
-    img = np.array(img)
+def letterbox_image(img, new_shape=(640, 640), color=(114, 114, 114)):
+    img = np.array(img.convert("RGB"))
     h, w = img.shape[:2]
-    new_w, new_h = new_size
+    new_w, new_h = new_shape
     scale = min(new_w / w, new_h / h)
-    resized_w, resized_h = int(w * scale), int(h * scale)
-    resized = cv2.resize(img, (resized_w, resized_h))
-    pad_w = new_w - resized_w
-    pad_h = new_h - resized_h
+    resize_w, resize_h = int(w * scale), int(h * scale)
+    img_resized = cv2.resize(img, (resize_w, resize_h))
+    pad_w, pad_h = new_w - resize_w, new_h - resize_h
     top, bottom = pad_h // 2, pad_h - pad_h // 2
     left, right = pad_w // 2, pad_w - pad_w // 2
-    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
-    return padded
+    img_padded = cv2.copyMakeBorder(img_resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return img_padded
 
-# -----------------------------
-# 前処理
-# -----------------------------
 def preprocess(img, h, w):
-    img = letterbox(img, new_size=(w, h))
-    img = img[:, :, ::-1]  # BGR -> RGB
-    img = img.transpose(2, 0, 1).astype(np.float32) / 255.0
-    return np.expand_dims(img, 0)
+    img = letterbox_image(img, (w, h))
+    arr = img.astype(np.float32) / 255.0
+    arr = arr.transpose(2, 0, 1)
+    return np.expand_dims(arr, 0)
 
 # -----------------------------
 # COCOクラス
@@ -90,37 +82,29 @@ COCO_CLASSES = [
 ]
 
 # -----------------------------
-# 後処理
+# 後処理（スコア無視してクラス名返す）
 # -----------------------------
 def postprocess(output):
     try:
         preds = np.array(output[0])
         if preds.size == 0 or preds.ndim < 2:
             return []
-
         if preds.ndim == 3:
             B, N, D = preds.shape
             preds = preds.reshape(B * N, D)
         elif preds.ndim >= 4:
             D = preds.shape[-1]
             preds = preds.reshape(-1, D)
-
         if preds.shape[1] < 6:
             return []
-
         obj = preds[:, 4:5]
         cls = preds[:, 5:]
         scores = obj * cls
-
-        # 最大スコアのクラスを必ず返す
         flat_idx = int(scores.argmax())
-        box_idx, cls_idx = np.unravel_index(flat_idx, scores.shape)
-        if cls_idx < 0 or cls_idx >= len(COCO_CLASSES):
-            cls_idx = 0
-
+        _, cls_idx = np.unravel_index(flat_idx, scores.shape)
+        cls_idx = max(0, min(cls_idx, len(COCO_CLASSES)-1))
         return [COCO_CLASSES[int(cls_idx)]]
-
-    except Exception:
+    except:
         traceback.print_exc()
         return []
 
@@ -131,6 +115,9 @@ def save_to_supabase(class_name: str) -> bool:
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("⚠ Supabase URL/KEY not set. Skipping save.")
         return False
+    if not class_name:
+        print("⚠ class_name is empty. Skipping save.")
+        return False
     try:
         url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_TABLE}"
         headers = {
@@ -140,10 +127,13 @@ def save_to_supabase(class_name: str) -> bool:
             "Prefer": "return=minimal"
         }
         payload = {"class": class_name}
+        print("🚀 Sending to Supabase:", payload)
         res = requests.post(url, json=payload, headers=headers, timeout=10)
-        print("Supabase response:", res.status_code, res.text)
+        print("📦 Response status:", res.status_code)
+        print("📦 Response text:", res.text)
         return res.status_code in (200, 201)
-    except Exception:
+    except Exception as e:
+        print("❌ Exception while saving to Supabase:", e)
         traceback.print_exc()
         return False
 
@@ -157,11 +147,9 @@ def predict():
             return jsonify({"error": "model not loaded"}), 500
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
-
         file = request.files["image"]
         if file.filename == "":
             return jsonify({"error": "empty filename"}), 400
-
         try:
             img = Image.open(file.stream)
         except:
@@ -169,13 +157,11 @@ def predict():
 
         inp = preprocess(img, model_h, model_w)
         out = session.run(None, {input_name: inp})
-
         labels = postprocess(out)
         class_name = labels[0] if labels else None
         saved = save_to_supabase(class_name) if class_name else False
 
         return jsonify({"result": labels, "saved": saved})
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
