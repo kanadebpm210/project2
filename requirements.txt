@@ -5,3 +5,4 @@ pillow
 numpy
 requests
 gdown
+opencv-python-headless
