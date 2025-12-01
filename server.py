@@ -14,7 +14,7 @@ import requests
 PORT = int(os.environ.get("PORT", 10000))
 MODEL_PATH = "other.onnx"
 
-# Supabase
+# Supabase 設定
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
@@ -24,16 +24,29 @@ CORS(app)
 
 
 # -----------------------------
-# モデルロード
+# モデルロード（安全版）
 # -----------------------------
 def load_model(path):
     try:
         session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
         input_name = session.get_inputs()[0].name
-        shape = session.get_inputs()[0].shape
-        h, w = shape[2], shape[3]
+        shape = session.get_inputs()[0].shape  # [1,3,h,w] または [None,3,None,None]
+
+        h, w = None, None
+
+        # shape が None の場合に対応
+        if len(shape) == 4:
+            h = shape[2]
+            w = shape[3]
+
+        # None の場合は YOLO 既定の 640x640 を採用
+        if h is None or w is None:
+            print("⚠ Model shape undefined → fallback to 640x640")
+            h, w = 640, 640
+
         print(f"✔ Loaded model: {path} (input={w}x{h})")
         return session, input_name, h, w
+
     except Exception:
         print("❌ Failed to load ONNX model")
         traceback.print_exc()
@@ -56,7 +69,7 @@ def preprocess(img, h, w):
 
 
 # -----------------------------
-# COCO クラス（80クラス）
+# COCO クラス
 # -----------------------------
 COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
@@ -72,23 +85,19 @@ COCO_CLASSES = [
 
 
 # -----------------------------
-# 後処理（最もスコアが高い1クラスのみ返す）
+# 後処理（最も自信が高い1クラスだけ返す）
 # -----------------------------
 def postprocess(output):
     preds = output[0]  # (num_boxes, 85)
 
     if preds.size == 0:
-        return []
+        return ["unknown"]
 
-    # objectness, class scores
-    obj = preds[:, 4:5]
-    cls = preds[:, 5:]
-    scores = obj * cls  # combine
+    obj = preds[:, 4:5]   # object confidence
+    cls = preds[:, 5:]    # class confidence scores
+    scores = obj * cls    # combine
 
-    # 最も自信の高いボックスを取得
-    max_score_flat = scores.max()
     idx_box, idx_class = np.unravel_index(scores.argmax(), scores.shape)
-
     best_class = COCO_CLASSES[idx_class]
 
     return [best_class]
@@ -99,7 +108,7 @@ def postprocess(output):
 # -----------------------------
 def save_to_supabase(labels):
     if SUPABASE_URL is None or SUPABASE_KEY is None:
-        print("⚠ Supabase 情報が未設定。保存スキップ。")
+        print("⚠ Supabase 未設定 → 保存スキップ")
         return False
 
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
@@ -131,8 +140,12 @@ def predict():
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
 
+        file = request.files["image"]
+        if file.filename == "":
+            return jsonify({"error": "empty filename"}), 400
+
         try:
-            img = Image.open(BytesIO(request.files["image"].read()))
+            img = Image.open(file.stream)
         except UnidentifiedImageError:
             return jsonify({"error": "invalid image"}), 400
 
@@ -140,7 +153,6 @@ def predict():
         out = session.run(None, {input_name: inp})
         labels = postprocess(out)
 
-        # 保存
         save_to_supabase(labels)
 
         return jsonify({"result": labels})
