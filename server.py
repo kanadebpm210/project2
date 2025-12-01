@@ -5,9 +5,10 @@ import traceback
 import onnxruntime as ort
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 import numpy as np
 import requests
+from datetime import datetime
 
 # -----------------------------
 # 基本設定
@@ -90,7 +91,8 @@ def postprocess(output):
         cls = preds[:, 5:]
         scores = obj * cls
         flat_idx = int(scores.argmax())
-        _, cls_idx = np.unravel_index(flat_idx, scores.shape)
+        multi_idx = np.unravel_index(flat_idx, scores.shape)
+        cls_idx = multi_idx[-1]
         if cls_idx < 0 or cls_idx >= len(COCO_CLASSES):
             return []
         return [COCO_CLASSES[int(cls_idx)]]
@@ -99,7 +101,7 @@ def postprocess(output):
         return []
 
 # -----------------------------
-# Supabase 保存 (class カラム対応)
+# Supabase 保存
 # -----------------------------
 def save_to_supabase(class_name: str) -> bool:
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -113,7 +115,10 @@ def save_to_supabase(class_name: str) -> bool:
             "Content-Type": "application/json",
             "Prefer": "return=minimal"
         }
-        payload = {"class": class_name}  # 単一クラス名
+        payload = {
+            "class": class_name,
+            "created_at": datetime.utcnow().isoformat()  # UTC 時刻
+        }
         res = requests.post(url, json=payload, headers=headers, timeout=10)
         print("Supabase response:", res.status_code, res.text)
         return res.status_code in (200, 201)
