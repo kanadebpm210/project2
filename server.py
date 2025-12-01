@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 import os
 import traceback
 import onnxruntime as ort
@@ -8,17 +9,16 @@ from flask_cors import CORS
 from PIL import Image
 import numpy as np
 import requests
-from datetime import datetime
 
 # -----------------------------
 # 基本設定
 # -----------------------------
 PORT = int(os.environ.get("PORT", 10000))
-MODEL_PATH = os.environ.get("MODEL_PATH", "other.onnx")
+MODEL_PATH = os.environ.get("MODEL_PATH", "other.onnx")  # YOLOv8 ONNXモデル
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")
+SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "ai_results")  # id, created_at, class
 
 app = Flask(__name__)
 CORS(app)
@@ -79,24 +79,30 @@ def postprocess(output):
         preds = np.array(output[0])
         if preds.size == 0 or preds.ndim < 2:
             return []
+
         if preds.ndim == 3:
             B, N, D = preds.shape
             preds = preds.reshape(B * N, D)
         elif preds.ndim >= 4:
             D = preds.shape[-1]
             preds = preds.reshape(-1, D)
+
         if preds.shape[1] < 6:
             return []
+
         obj = preds[:, 4:5]
         cls = preds[:, 5:]
         scores = obj * cls
+
+        # 最大スコアのクラスを必ず返す
         flat_idx = int(scores.argmax())
-        multi_idx = np.unravel_index(flat_idx, scores.shape)
-        cls_idx = multi_idx[-1]
+        box_idx, cls_idx = np.unravel_index(flat_idx, scores.shape)
         if cls_idx < 0 or cls_idx >= len(COCO_CLASSES):
-            return []
+            cls_idx = 0
+
         return [COCO_CLASSES[int(cls_idx)]]
-    except:
+
+    except Exception:
         traceback.print_exc()
         return []
 
@@ -115,14 +121,11 @@ def save_to_supabase(class_name: str) -> bool:
             "Content-Type": "application/json",
             "Prefer": "return=minimal"
         }
-        payload = {
-            "class": class_name,
-            "created_at": datetime.utcnow().isoformat()  # UTC 時刻
-        }
+        payload = {"class": class_name}
         res = requests.post(url, json=payload, headers=headers, timeout=10)
         print("Supabase response:", res.status_code, res.text)
         return res.status_code in (200, 201)
-    except:
+    except Exception:
         traceback.print_exc()
         return False
 
@@ -136,6 +139,7 @@ def predict():
             return jsonify({"error": "model not loaded"}), 500
         if "image" not in request.files:
             return jsonify({"error": "image required"}), 400
+
         file = request.files["image"]
         if file.filename == "":
             return jsonify({"error": "empty filename"}), 400
@@ -147,11 +151,13 @@ def predict():
 
         inp = preprocess(img, model_h, model_w)
         out = session.run(None, {input_name: inp})
+
         labels = postprocess(out)
         class_name = labels[0] if labels else None
         saved = save_to_supabase(class_name) if class_name else False
 
         return jsonify({"result": labels, "saved": saved})
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
