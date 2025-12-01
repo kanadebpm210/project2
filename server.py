@@ -45,7 +45,7 @@ def load_model(path):
 session, input_name, model_h, model_w = load_model(MODEL_PATH)
 
 # -----------------------------
-# Letterbox (アスペクト比維持) 前処理
+# Letterbox 前処理
 # -----------------------------
 def letterbox_image(img, new_shape=(640, 640), color=(114, 114, 114)):
     img = np.array(img.convert("RGB"))
@@ -58,13 +58,13 @@ def letterbox_image(img, new_shape=(640, 640), color=(114, 114, 114)):
     top, bottom = pad_h // 2, pad_h - pad_h // 2
     left, right = pad_w // 2, pad_w - pad_w // 2
     img_padded = cv2.copyMakeBorder(img_resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
-    return img_padded
+    return img_padded, scale, left, top
 
 def preprocess(img, h, w):
-    img = letterbox_image(img, (w, h))
-    arr = img.astype(np.float32) / 255.0
+    img_padded, scale, pad_x, pad_y = letterbox_image(img, (w, h))
+    arr = img_padded.astype(np.float32) / 255.0
     arr = arr.transpose(2, 0, 1)
-    return np.expand_dims(arr, 0)
+    return np.expand_dims(arr, 0), scale, pad_x, pad_y
 
 # -----------------------------
 # COCOクラス
@@ -82,28 +82,38 @@ COCO_CLASSES = [
 ]
 
 # -----------------------------
-# 後処理（スコア無視してクラス名返す）
+# 後処理（複数クラス対応）
 # -----------------------------
-def postprocess(output):
+def postprocess(output, scale, pad_x, pad_y, score_thresh=0.05):
     try:
         preds = np.array(output[0])
-        if preds.size == 0 or preds.ndim < 2:
+        if preds.size == 0:
             return []
+
         if preds.ndim == 3:
             B, N, D = preds.shape
             preds = preds.reshape(B * N, D)
         elif preds.ndim >= 4:
             D = preds.shape[-1]
             preds = preds.reshape(-1, D)
+
         if preds.shape[1] < 6:
             return []
+
         obj = preds[:, 4:5]
         cls = preds[:, 5:]
         scores = obj * cls
-        flat_idx = int(scores.argmax())
-        _, cls_idx = np.unravel_index(flat_idx, scores.shape)
-        cls_idx = max(0, min(cls_idx, len(COCO_CLASSES)-1))
-        return [COCO_CLASSES[int(cls_idx)]]
+
+        results = []
+        for i in range(scores.shape[0]):
+            cls_idx = int(np.argmax(scores[i]))
+            conf = float(scores[i, cls_idx])
+            if conf >= score_thresh:
+                results.append({
+                    "class": COCO_CLASSES[cls_idx],
+                    "score": conf
+                })
+        return results
     except:
         traceback.print_exc()
         return []
@@ -115,9 +125,6 @@ def save_to_supabase(class_name: str) -> bool:
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("⚠ Supabase URL/KEY not set. Skipping save.")
         return False
-    if not class_name:
-        print("⚠ class_name is empty. Skipping save.")
-        return False
     try:
         url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_TABLE}"
         headers = {
@@ -126,14 +133,11 @@ def save_to_supabase(class_name: str) -> bool:
             "Content-Type": "application/json",
             "Prefer": "return=minimal"
         }
-        payload = {"class": class_name}
-        print("🚀 Sending to Supabase:", payload)
+        payload = {"class": class_name}  # 単一クラス名
         res = requests.post(url, json=payload, headers=headers, timeout=10)
-        print("📦 Response status:", res.status_code)
-        print("📦 Response text:", res.text)
+        print("Supabase response:", res.status_code, res.text)
         return res.status_code in (200, 201)
-    except Exception as e:
-        print("❌ Exception while saving to Supabase:", e)
+    except:
         traceback.print_exc()
         return False
 
@@ -150,16 +154,21 @@ def predict():
         file = request.files["image"]
         if file.filename == "":
             return jsonify({"error": "empty filename"}), 400
+
         try:
             img = Image.open(file.stream)
         except:
             return jsonify({"error": "invalid image"}), 400
 
-        inp = preprocess(img, model_h, model_w)
+        inp, scale, pad_x, pad_y = preprocess(img, model_h, model_w)
         out = session.run(None, {input_name: inp})
-        labels = postprocess(out)
-        class_name = labels[0] if labels else None
-        saved = save_to_supabase(class_name) if class_name else False
+        labels = postprocess(out, scale, pad_x, pad_y, score_thresh=0.1)
+
+        saved = False
+        if labels:
+            for l in labels:
+                save_to_supabase(l["class"])
+            saved = True
 
         return jsonify({"result": labels, "saved": saved})
     except Exception as e:
