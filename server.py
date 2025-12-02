@@ -163,8 +163,7 @@ def predict():
         inp, scale, pad_x, pad_y = preprocess(img, model_h, model_w)
         out = session.run(None, {input_name: inp})
         print(out)
-        labels = postprocess(out, scale, pad_x, pad_y, score_thresh=0.1)
-
+        labels = out
         saved = False
         if labels:
             for l in labels:
