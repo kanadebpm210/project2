@@ -82,13 +82,11 @@ COCO_CLASSES = [
 ]
 
 # -----------------------------
-# 後処理（confidence 無視で全クラス返却）
+# 後処理（複数クラス対応）
 # -----------------------------
-def postprocess_debug(output):
+def postprocess(output, scale, pad_x, pad_y, score_thresh=0.05):
     try:
         preds = np.array(output[0])
-        print("DEBUG: output shape:", preds.shape)
-        print("DEBUG: first 5 predictions:", preds[:5])
         if preds.size == 0:
             return []
 
@@ -104,15 +102,17 @@ def postprocess_debug(output):
 
         obj = preds[:, 4:5]
         cls = preds[:, 5:]
+        scores = obj * cls
 
         results = []
-        for i in range(preds.shape[0]):
-            cls_idx = int(np.argmax(cls[i]))
-            conf = float(cls[i, cls_idx])
-            results.append({
-                "class": COCO_CLASSES[cls_idx],
-                "score": conf
-            })
+        for i in range(scores.shape[0]):
+            cls_idx = int(np.argmax(scores[i]))
+            conf = float(scores[i, cls_idx])
+            if conf >= score_thresh:
+                results.append({
+                    "class": COCO_CLASSES[cls_idx],
+                    "score": conf
+                })
         return results
     except:
         traceback.print_exc()
@@ -162,7 +162,8 @@ def predict():
 
         inp, scale, pad_x, pad_y = preprocess(img, model_h, model_w)
         out = session.run(None, {input_name: inp})
-        labels = postprocess_debug(out)
+        print(out)
+        labels = postprocess(out, scale, pad_x, pad_y, score_thresh=0.1)
 
         saved = False
         if labels:
